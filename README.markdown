@@ -11,6 +11,20 @@ The extensive "8080/8085 CPU Exerciser" test by Ian Bartholomew provides
 strong guarantees of the match.
 
 
+Fork notes
+==========
+This purpose of this fork of the original project is to allow creating more
+than one 8080 cpu instance in my emulator.  The core logic is 95% the same,
+but I had to modify the interface significantly.
+
+There is now also a function to call to trigger an interrupt. This is
+provisional as I anticipate the current mechanism will be somewhat awkward.
+Specifically, it is the responsibility of the caller to re-raise an interrupt
+if the interrupt condition is still true after the current ISR completes.
+It isn't obvious that the caller can know when that happens! I suspect I'll
+have to add a callback function for this.
+
+
 Build
 =====
 
@@ -104,22 +118,20 @@ All tests pass.
 Note
 ====
 
-Unfortunately, the current implementation needs the little-endian system
-to run properly. It uses unions to mix different data types, and such
-technique is not portable across little- and big-endian systems. Fortunately,
-most of popular desktop systems running Windows and OSX are based on Intel
-x86/64 which is little endian. Also, this emulator was tested on the PIC32
-platform (little endian as well).
+Although the most popular CPUs today use little-endian convention, if your
+host computer is big-endian, comment out "#define LITTLE_ENDIAN" in
+i8080.h.
 
 
 Usage
 =====
 
 The implemention of the Intel 8080 model is self-contained and independent.
-It only requires the `i8080_hal.h` header providing the hardware abstraction
-layer.
+The caller creates a cpu instance by calling i8080_new and passing in
+callback functions to handle memory read, memory write, input byte, and
+output byte behavior.
 
-The example of use is the test suite (`i8080_test.c` and `i8080_hal.c`).
+The example of use is the test suite (`i8080_test.c`).
 It creates bare miminum hardware plumbing to run tests.
 
 
