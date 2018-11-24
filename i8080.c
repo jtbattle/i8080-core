@@ -1,6 +1,7 @@
 // Intel 8080 (KR580VM80A) microprocessor core model
 //
 // Copyright (C) 2012 Alexander Demin <alexander@demin.ws>
+// Changes 2018/11/23, Jim Battle (frustum@pobox.com) (see below)
 //
 // Credits
 //
@@ -31,75 +32,58 @@
 // along with this program; if not, write to the Free Software
 // Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
+// Changes 2018/11/23, Jim Battle (frustum@pobox.com):
+//
+// This program is 95% the same as Alexander Demin's code.  My changes were
+// simply to make the cpu state dynamically allocated instead of statically
+// allocated so my emulator can have multiple 8080 cpu instances.
+// The i8080_hal_foo() functionality was removed and replaced by callback
+// read/write/in/out handlers.
+//
+// The "void *user" state was added to allow saving an instance pointer so the
+// library could be called from C++ member functions. In this case the callback
+// must be a static member function, but that can retrieve the user pointer and
+// cast it to an instance pointer.
+
 #include "i8080.h"
-#include "i8080_hal.h"
+#include <assert.h>
 
-#define RD_BYTE(addr) i8080_hal_memory_read_byte(addr)
-#define RD_WORD(addr) i8080_hal_memory_read_word(addr)
+#define RD_BYTE(addr)        (*(cpu->rd_func))(addr)
+#define WR_BYTE(addr, value) (*(cpu->wr_func))(addr, value)
 
-#define WR_BYTE(addr, value) i8080_hal_memory_write_byte(addr, value)
-#define WR_WORD(addr, value) i8080_hal_memory_write_word(addr, value)
+#define RD_WORD(addr) ((RD_BYTE((addr)+1) << 8) | RD_BYTE(addr))
 
-typedef unsigned char           uns8;
-typedef unsigned short          uns16;
-typedef unsigned long int       uns32;
-typedef signed char             sgn8;
-typedef signed short            sgn16;
-typedef signed long int         sgn32;
+#define WR_WORD(addr, value) { WR_BYTE(addr,    ((value)       & 0xff)); \
+                               WR_BYTE(addr+1, (((value) >> 8) & 0xff)); }
 
-typedef union {
-    struct {
-        uns8 l, h;
-    } b;
-    uns16 w;
-} reg_pair;
-
-typedef struct {
-    uns8 carry_flag;
-    uns8 unused1;
-    uns8 parity_flag;
-    uns8 unused3;
-    uns8 half_carry_flag;
-    uns8 unused5;
-    uns8 zero_flag;
-    uns8 sign_flag;
-} flag_reg;
-
-struct i8080 {
-    flag_reg f;
-    reg_pair af, bc, de, hl;
-    reg_pair sp, pc;
-    uns16 iff;
-    uns16 last_pc;
-};
-
-#define FLAGS           cpu.f
-#define AF              cpu.af.w
-#define BC              cpu.bc.w
-#define DE              cpu.de.w
-#define HL              cpu.hl.w
-#define SP              cpu.sp.w
-#define PC              cpu.pc.w
-#define A               cpu.af.b.h
-#define F               cpu.af.b.l
-#define B               cpu.bc.b.h
-#define C               cpu.bc.b.l
-#define D               cpu.de.b.h
-#define E               cpu.de.b.l
-#define H               cpu.hl.b.h
-#define L               cpu.hl.b.l
-#define HSP             cpu.sp.b.h
-#define LSP             cpu.sp.b.l
-#define HPC             cpu.pc.b.h
-#define LPC             cpu.pc.b.l
-#define IFF             cpu.iff
+#define FLAGS           cpu->f
+#define AF              cpu->af.w
+#define BC              cpu->bc.w
+#define DE              cpu->de.w
+#define HL              cpu->hl.w
+#define SP              cpu->sp.w
+#define PC              cpu->pc.w
+#define A               cpu->af.b.h
+#define F               cpu->af.b.l
+#define B               cpu->bc.b.h
+#define C               cpu->bc.b.l
+#define D               cpu->de.b.h
+#define E               cpu->de.b.l
+#define H               cpu->hl.b.h
+#define L               cpu->hl.b.l
+#define HSP             cpu->sp.b.h
+#define LSP             cpu->sp.b.l
+#define HPC             cpu->pc.b.h
+#define LPC             cpu->pc.b.l
+#define INTE            cpu->inte
+#define HALT            cpu->halt
 
 #define F_CARRY         0x01
-#define F_UN1           0x02
+#define F_UN1           0x02   // ununsed; always 1
 #define F_PARITY        0x04
-#define F_UN3           0x08
+#define F_UN3           0x08   // ununsed; always 0
 #define F_HCARRY        0x10
-#define F_UN5           0x20
+#define F_UN5           0x20   // ununsed; always 0
 #define F_ZERO          0x40
 #define F_NEG           0x80
 
@@ -143,7 +127,7 @@ struct i8080 {
 
 #define ADD(val) \
 {                                               \
-    work16 = (uns16)A + (val);                  \
+    work16 = (uint16_t)A + (val);               \
     index = ((A & 0x88) >> 1) |                 \
             (((val) & 0x88) >> 2) |             \
             ((work16 & 0x88) >> 3);             \
@@ -157,7 +141,7 @@ struct i8080 {
 
 #define ADC(val) \
 {                                               \
-    work16 = (uns16)A + (val) + C_FLAG;         \
+    work16 = (uint16_t)A + (val) + C_FLAG;      \
     index = ((A & 0x88) >> 1) |                 \
             (((val) & 0x88) >> 2) |             \
             ((work16 & 0x88) >> 3);             \
@@ -171,7 +155,7 @@ struct i8080 {
 
 #define SUB(val) \
 {                                                \
-    work16 = (uns16)A - (val);                   \
+    work16 = (uint16_t)A - (val);                \
     index = ((A & 0x88) >> 1) |                  \
             (((val) & 0x88) >> 2) |              \
             ((work16 & 0x88) >> 3);              \
@@ -185,7 +169,7 @@ struct i8080 {
 
 #define SBB(val) \
 {                                                \
-    work16 = (uns16)A - (val) - C_FLAG;          \
+    work16 = (uint16_t)A - (val) - C_FLAG;       \
     index = ((A & 0x88) >> 1) |                  \
             (((val) & 0x88) >> 2) |              \
             ((work16 & 0x88) >> 3);              \
@@ -199,7 +183,7 @@ struct i8080 {
 
 #define CMP(val) \
 {                                                \
-    work16 = (uns16)A - (val);                   \
+    work16 = (uint16_t)A - (val);                \
     index = ((A & 0x88) >> 1) |                  \
             (((val) & 0x88) >> 2) |              \
             ((work16 & 0x88) >> 3);              \
@@ -242,7 +226,7 @@ struct i8080 {
 
 #define DAD(reg) \
 {                                               \
-    work32 = (uns32)HL + (reg);                 \
+    work32 = (uint32_t)HL + (reg);              \
     HL = work32 & 0xffff;                       \
     C_FLAG = ((work32 & 0x10000L) != 0);        \
 }
@@ -261,15 +245,13 @@ struct i8080 {
 
 #define PARITY(reg) parity_table[(reg)]
 
-static struct i8080 cpu;
-
-static uns32 work32;
-static uns16 work16;
-static uns8 work8;
+static uint32_t work32;
+static uint16_t work16;
+static uint8_t work8;
 static int index;
-static uns8 carry, add;
+static uint8_t carry, add;
 
-int parity_table[] = {
+static uint8_t parity_table[] = {
     1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
     0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
     0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
@@ -288,34 +270,23 @@ int parity_table[] = {
     1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
 };
 
-int half_carry_table[] = { 0, 0, 1, 0, 1, 0, 1, 1 };
-int sub_half_carry_table[] = { 0, 1, 1, 1, 0, 0, 0, 1 };
+static uint8_t half_carry_table[]     = { 0, 0, 1, 0, 1, 0, 1, 1 };
+static uint8_t sub_half_carry_table[] = { 0, 1, 1, 1, 0, 0, 0, 1 };
 
-void i8080_init(void) {
-    C_FLAG = 0;
-    S_FLAG = 0;
-    Z_FLAG = 0;
-    H_FLAG = 0;
-    P_FLAG = 0;
-    UN1_FLAG = 1;
-    UN3_FLAG = 0;
-    UN5_FLAG = 0;
-
-    PC = 0xF800;
+static void i8080_store_flags(i8080 *cpu)
+{
+    F = F_UN1;     // bit 1 unused; always 1
+    if (S_FLAG) F |= F_NEG;
+    if (Z_FLAG) F |= F_ZERO;
+    if (H_FLAG) F |= F_HCARRY;
+    if (P_FLAG) F |= F_PARITY;
+    if (C_FLAG) F |= F_CARRY;
+//  F &= ~F_UN3;   // bit 3 unused; always 0
+//  F &= ~F_UN5;   // bit 5 unused; always 0
 }
 
-static void i8080_store_flags(void) {
-    if (S_FLAG) F |= F_NEG;      else F &= ~F_NEG;
-    if (Z_FLAG) F |= F_ZERO;     else F &= ~F_ZERO;
-    if (H_FLAG) F |= F_HCARRY;   else F &= ~F_HCARRY;
-    if (P_FLAG) F |= F_PARITY;   else F &= ~F_PARITY;
-    if (C_FLAG) F |= F_CARRY;    else F &= ~F_CARRY;
-    F |= F_UN1;    // UN1_FLAG is always 1.
-    F &= ~F_UN3;   // UN3_FLAG is always 0.
-    F &= ~F_UN5;   // UN5_FLAG is always 0.
-}
-
-static void i8080_retrieve_flags(void) {
+static void i8080_retrieve_flags(i8080 *cpu)
+{
     S_FLAG = F & F_NEG      ? 1 : 0;
     Z_FLAG = F & F_ZERO     ? 1 : 0;
     H_FLAG = F & F_HCARRY   ? 1 : 0;
@@ -323,8 +294,63 @@ static void i8080_retrieve_flags(void) {
     C_FLAG = F & F_CARRY    ? 1 : 0;
 }
 
-static int i8080_execute(int opcode) {
+/* create a new cpu instance */
+i8080 *i8080_new(rd_handler  *rd_func,
+                 wr_handler  *wr_func,
+                 in_handler  *in_func,
+                 out_handler *out_func,
+                 void        *user)
+{
+    assert(rd_func != 0);
+    assert(wr_func != 0);
+    assert(in_func != 0);
+    assert(out_func != 0);
+
+    i8080 *cpu = (i8080 *)malloc(sizeof(i8080));
+    assert(cpu != 0);
+
+    cpu->rd_func  = rd_func;
+    cpu->wr_func  = wr_func;
+    cpu->in_func  = in_func;
+    cpu->out_func = out_func;
+    cpu->user     = user;
+
+    i8080_reset(cpu);
+
+    return cpu;
+}
+
+/* destroy a cpu instance */
+/* if there is user data, it is the caller's responsibility to free it */
+void i8080_destroy(i8080 *cpu)
+{
+    free(cpu);
+}
+
+void i8080_reset(i8080 *cpu)
+{
+    C_FLAG = 0;
+    S_FLAG = 0;
+    Z_FLAG = 0;
+    H_FLAG = 0;
+    P_FLAG = 0;
+
+    HALT = 0;
+    INTE = 0;
+
+    PC = 0x0000;
+}
+
+int i8080_exec_one_op(i8080 *cpu)
+{
     int cpu_cycles;
+    int opcode;
+
+    if (HALT) {
+        return 4;
+    }
+
+    opcode = RD_BYTE(PC++);
     switch (opcode) {
         case 0x00:            /* nop */
         // Undocumented NOP.
@@ -444,7 +470,7 @@ static int i8080_execute(int opcode) {
 
         case 0x17:            /* ral */
             cpu_cycles = 4;
-            work8 = (uns8)C_FLAG;
+            work8 = (uint8_t)C_FLAG;
             C_FLAG = ((A & 0x80) != 0);
             A = (A << 1) | work8;
             break;
@@ -481,7 +507,7 @@ static int i8080_execute(int opcode) {
 
         case 0x1F:             /* rar */
             cpu_cycles = 4;
-            work8 = (uns8)C_FLAG;
+            work8 = (uint8_t)C_FLAG;
             C_FLAG = A & 0x01;
             A = (A >> 1) | (work8 << 7);
             break;
@@ -520,7 +546,7 @@ static int i8080_execute(int opcode) {
 
         case 0x27:            /* daa */
             cpu_cycles = 4;
-            carry = (uns8)C_FLAG;
+            carry = (uint8_t)C_FLAG;
             add = 0;
             if (H_FLAG || (A & 0x0f) > 9) {
                 add = 0x06;
@@ -913,7 +939,7 @@ static int i8080_execute(int opcode) {
 
         case 0x76:            /* hlt */
             cpu_cycles = 4;
-            PC--;
+            HALT = 1;
             break;
 
         case 0x77:            /* mov m, a */
@@ -1419,7 +1445,7 @@ static int i8080_execute(int opcode) {
 
         case 0xD3:            /* out port8 */
             cpu_cycles = 10;
-            i8080_hal_io_output(RD_BYTE(PC++), A);
+            (*(cpu->out_func))(RD_BYTE(PC++), A);
             break;
 
         case 0xD4:            /* cnc addr */
@@ -1467,7 +1493,7 @@ static int i8080_execute(int opcode) {
 
         case 0xDB:            /* in port8 */
             cpu_cycles = 10;
-            A = i8080_hal_io_input(RD_BYTE(PC++));
+            A = (*(cpu->in_func))(RD_BYTE(PC++));
             break;
 
         case 0xDC:            /* cc addr */
@@ -1608,7 +1634,7 @@ static int i8080_execute(int opcode) {
         case 0xF1:            /* pop psw */
             cpu_cycles = 10;
             POP(AF);
-            i8080_retrieve_flags();
+            i8080_retrieve_flags(cpu);
             break;
 
         case 0xF2:            /* jp addr */
@@ -1622,8 +1648,7 @@ static int i8080_execute(int opcode) {
 
         case 0xF3:            /* di */
             cpu_cycles = 4;
-            IFF = 0;
-            i8080_hal_iff(IFF);
+            INTE = 0;
             break;
 
         case 0xF4:            /* cp addr */
@@ -1638,7 +1663,7 @@ static int i8080_execute(int opcode) {
 
         case 0xF5:            /* push psw */
             cpu_cycles = 11;
-            i8080_store_flags();
+            i8080_store_flags(cpu);
             PUSH(AF);
             break;
 
@@ -1676,9 +1701,13 @@ static int i8080_execute(int opcode) {
             break;
 
         case 0xFB:            /* ei */
+            /* FIXME: interrupt enable doesn't take effect until after the next
+             * instruction, so the program state always makes at least one
+             * instruction progress even with an always on interrupt. for now,
+             * let it slide.
+             */
             cpu_cycles = 4;
-            IFF = 1;
-            i8080_hal_iff(IFF);
+            INTE = 1;
             break;
 
         case 0xFC:            /* cm addr */
@@ -1706,61 +1735,22 @@ static int i8080_execute(int opcode) {
             cpu_cycles = -1;  /* Shouldn't be really here. */
             break;
     }
+
     return cpu_cycles;
 }
 
-int i8080_instruction(void) {
-    return i8080_execute(RD_BYTE(PC++));
-}
+/* the 8080 can accept any one byte instruction, but traditionally it is
+ * one of the eight RST opcodes. the emulator asserts if it isn't one.
+ */
+void i8080_interrupt(i8080 *cpu, uint8_t op)
+{
+    if (!INTE) {
+        return;
+    }
+    assert((op & 0xC7) == 0xC7);  /* rst n */
 
-void i8080_jump(int addr) {
-    PC = addr & 0xffff;
-}
-
-int i8080_pc(void) {
-    return PC;
-}
-
-int i8080_regs_bc(void) {
-    return BC;
-}
-
-int i8080_regs_de(void) {
-    return DE;
-}
-
-int i8080_regs_hl(void) {
-    return HL;
-}
-
-int i8080_regs_sp(void) {
-    return SP;
-}
-
-int i8080_regs_a(void) {
-    return A;
-}
-
-int i8080_regs_b(void) {
-    return B;
-}
-
-int i8080_regs_c(void) {
-    return C;
-}
-
-int i8080_regs_d(void) {
-    return D;
-}
-
-int i8080_regs_e(void) {
-    return E;
-}
-
-int i8080_regs_h(void) {
-    return H;
-}
-
-int i8080_regs_l(void) {
-    return L;
+    INTE = 0;
+    HALT = 0;
+    PUSH(PC);
+    PC = (op & 0x38);  /* 00000000 000nnn000 */
 }

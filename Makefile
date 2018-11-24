@@ -12,7 +12,6 @@ endif
 
 FILES = \
   i8080.c \
-  i8080_hal.c \
   i8080_test.c
 
 build:
